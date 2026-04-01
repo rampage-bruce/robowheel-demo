@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.hamer/
+
+# Model weights & large data
+*.pt
+*.pth
+*.ckpt
+*.tar.gz
+*.pkl
+*.bin
+hamer/_DATA/
+hamer/hamer_training_data/
+
+# Generated outputs
+output/
+test_videos/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.ipynb_checkpoints/
+
+# Cache
+.cache/
+wandb/

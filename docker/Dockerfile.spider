@@ -1,0 +1,25 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV MUJOCO_GL=egl
+
+# Basic tools
+RUN apt-get update && apt-get install -y \
+    software-properties-common git wget curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 3.12
+RUN add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.12 python3.12-venv python3.12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# EGL/GL for MuJoCo rendering
+RUN apt-get update && apt-get install -y \
+    libegl1-mesa libegl-dev libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m ensurepip && python3.12 -m pip install --upgrade pip
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python
+
+WORKDIR /workspace
