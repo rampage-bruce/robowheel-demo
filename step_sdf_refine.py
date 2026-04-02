@@ -92,15 +92,18 @@ def refine_frame(model, data, qpos, obj_mesh, obj_pos):
         # Transform tip to object-local frame
         local_pos = pos - obj_pos
         sd = sdf_penetration_check(local_pos, obj_mesh)
-        if sd < -0.002:  # penetrating more than 2mm
+        if sd < -0.0005:  # penetrating more than 0.5mm
             penetrations[name] = sd
 
     if not penetrations:
-        return qpos, 0  # no penetration
+        return qpos, 0, 0.0, 0.0  # no penetration
 
     # Optimize: adjust finger joints to minimize penetration
     finger_joints = qpos[FINGER_START:FINGER_END].copy()
     joint_ranges = np.array([model.jnt_range[i] for i in range(FINGER_START, FINGER_END)])
+
+    _last_pen_cost = [0.0]
+    _last_reg_cost = [0.0]
 
     def objective(delta):
         test_qpos = qpos.copy()
@@ -130,6 +133,8 @@ def refine_frame(model, data, qpos, obj_mesh, obj_pos):
         # Regularization: don't change too much
         reg_cost = np.sum(delta ** 2) * 10.0
 
+        _last_pen_cost[0] = pen_cost
+        _last_reg_cost[0] = reg_cost
         return pen_cost + reg_cost
 
     result = minimize(objective, np.zeros(FINGER_END - FINGER_START),
@@ -143,7 +148,7 @@ def refine_frame(model, data, qpos, obj_mesh, obj_pos):
             refined_qpos[FINGER_START + j],
             joint_ranges[j, 0], joint_ranges[j, 1])
 
-    return refined_qpos, len(penetrations)
+    return refined_qpos, len(penetrations), _last_pen_cost[0], _last_reg_cost[0]
 
 
 def main():
@@ -169,19 +174,29 @@ def main():
     refined_traj = np.zeros_like(qpos_traj)
     total_pen = 0
 
+    total_pen_loss = 0.0
+    total_reg_loss = 0.0
+
     for i in range(N):
         # Update object position each frame
         obj_pos_i = get_object_position(model, data, qpos_traj[i])
-        refined_traj[i], n_pen = refine_frame(model, data, qpos_traj[i], obj_mesh, obj_pos_i)
+        refined_traj[i], n_pen, pen_loss, reg_loss = refine_frame(model, data, qpos_traj[i], obj_mesh, obj_pos_i)
         total_pen += n_pen
+        total_pen_loss += pen_loss
+        total_reg_loss += reg_loss
 
-        if i % 30 == 0:
+        if i % 15 == 0:
             tips = get_fingertip_positions(model, data, refined_traj[i])
             tip_dists = [np.linalg.norm(p - obj_pos_i) for p in tips.values()]
-            print(f"  Frame {i:3d}/{N}: penetrations={n_pen}, "
-                  f"min_tip_dist={min(tip_dists):.4f}")
+            print(f"  Frame {i:3d}/{N}: pen={n_pen}, "
+                  f"pen_loss={pen_loss:.6f}, reg_loss={reg_loss:.6f}, "
+                  f"total_loss={pen_loss+reg_loss:.6f}, min_dist={min(tip_dists)*1000:.1f}mm")
 
-    print(f"Total penetrations fixed: {total_pen}")
+    print(f"\n=== SDF Refinement Summary ===")
+    print(f"  Total penetrations fixed: {total_pen}")
+    print(f"  Total pen_loss:  {total_pen_loss:.6f}")
+    print(f"  Total reg_loss:  {total_reg_loss:.6f}")
+    print(f"  Total loss:      {total_pen_loss + total_reg_loss:.6f}")
 
     # Smooth refined trajectory
     refined_traj[:, 6:22] = uniform_filter1d(refined_traj[:, 6:22], size=3, axis=0)

@@ -10,3 +10,9 @@
 [submodule "mujoco_menagerie"]
 	path = mujoco_menagerie
 	url = https://github.com/google-deepmind/mujoco_menagerie.git
+[submodule "nvblox_repo"]
+	path = nvblox_repo
+	url = https://github.com/nvidia-isaac/nvblox.git
+[submodule "nvblox_torch"]
+	path = nvblox_torch
+	url = https://github.com/NVlabs/nvblox_torch.git
