@@ -42,3 +42,13 @@ Thumbs.db
 # Cache
 .cache/
 wandb/
+FoundationPose/
+nvblox_repo/
+nvblox_torch/
+nvblox/
+spider/example_datasets/
+mujoco_menagerie/
+hamer/_DATA/
+output/
+__pycache__/
+*.pyc

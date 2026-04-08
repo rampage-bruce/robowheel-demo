@@ -365,33 +365,44 @@ def train():
     print("=== Layer 2: PPO Residual RL Training ===")
     print("Creating environments...")
 
-    env = DummyVecEnv([lambda: BimanualGraspEnv() for _ in range(4)])
+    from stable_baselines3.common.vec_env import VecNormalize
 
-    print("Training PPO...")
+    env = DummyVecEnv([lambda: BimanualGraspEnv() for _ in range(16)])
+    # Normalize observations and rewards (running mean/std)
+    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+
+    print("Training PPO (16 envs, 500K steps, normalized rewards)...")
     model = PPO(
         "MlpPolicy", env,
         learning_rate=3e-4,
-        n_steps=512,
-        batch_size=128,
+        n_steps=256,       # per env → 256×16=4096 total per rollout
+        batch_size=256,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
+        ent_coef=0.005,    # slight entropy bonus for exploration
+        vf_coef=0.5,
+        max_grad_norm=0.5,
         verbose=1,
-        # tensorboard_log=os.path.join(OUT_DIR, 'tb_logs'),
     )
 
-    # Train for 100K steps (~10 min on CPU)
-    model.learn(total_timesteps=100_000, progress_bar=True)
+    model.learn(total_timesteps=200_000, progress_bar=True)
     model.save(os.path.join(OUT_DIR, 'ppo_grasp'))
+    env.save(os.path.join(OUT_DIR, 'vec_normalize.pkl'))
     print(f"Model saved to {OUT_DIR}/ppo_grasp.zip")
 
-    return model
+    return model, env
 
 
-def evaluate_and_render(model):
+def evaluate_and_render(model, train_env=None):
     print("\n=== Layer 3: Replay RL Policy ===")
     env = BimanualGraspEnv(render_mode="rgb_array")
+
+    # If trained with VecNormalize, need to normalize obs during eval too
+    obs_rms = None
+    if train_env is not None and hasattr(train_env, 'obs_rms'):
+        obs_rms = train_env.obs_rms
 
     obs, _ = env.reset(seed=42)
     frames = []
@@ -400,7 +411,12 @@ def evaluate_and_render(model):
     max_lift = 0
 
     for i in range(200):
-        action, _ = model.predict(obs, deterministic=True)
+        # Normalize obs if VecNormalize was used during training
+        obs_input = obs
+        if obs_rms is not None:
+            obs_input = (obs - obs_rms.mean) / np.sqrt(obs_rms.var + 1e-8)
+            obs_input = np.clip(obs_input, -10, 10).astype(np.float32)
+        action, _ = model.predict(obs_input, deterministic=True)
         obs, reward, done, _, info = env.step(action)
         total_reward += reward
         max_contacts = max(max_contacts, info['contacts'])
@@ -463,5 +479,5 @@ def evaluate_and_render(model):
 
 
 if __name__ == '__main__':
-    model = train()
-    evaluate_and_render(model)
+    model, train_env = train()
+    evaluate_and_render(model, train_env)

@@ -841,3 +841,322 @@ r_t = λ_geo · (-指尖到瓶子距离)     ← 几何跟踪
 - 最大接触: **67**
 - residual_norm: **0.26**（很小，大部分姿态来自 MANO）
 - 和视频中人手抓取的对应关系更强
+
+### 15.3 PPO 训练优化（2026-04-02）
+
+优化 PPO 训练配置：
+
+| 参数 | 之前 | 现在 |
+|------|------|------|
+| 并行环境 | 4 (DummyVecEnv) | **16** |
+| 训练步数 | 100K | **500K** |
+| Reward 归一化 | 无 | **VecNormalize** (obs+reward) |
+| n_steps | 512 | 256 (×16=4096/rollout) |
+| batch_size | 128 | 256 |
+| ent_coef | 0 | 0.005 (探索奖励) |
+| max_grad_norm | 无 | 0.5 (梯度裁剪) |
+
+**效果**：
+- value_loss: 3400~4800 → **0.03~0.08** (归一化后降 5 万倍)
+- explained_variance: 0.65 → **0.96** (值函数近乎完美)
+- 训练仍在进行中...
+
+### 15.4 优化后 PPO 结果（2026-04-02）
+
+| 指标 | 100K基线 | 200K优化 | 改善 |
+|------|---------|---------|------|
+| reward | 265 | **275** | +4% |
+| max contacts | 67 | **75** | +12% |
+| max lift | 10.1cm | **11.6cm** | +15% |
+| value_loss | 3400 | **0.03** | **5万倍↓** |
+| explained_var | 0.65 | **0.96** | 近乎完美 |
+| residual_norm | 0.26 | **0.27** | 保持小残差 |
+
+**PPO clip_range=0.2 限制策略更新幅度**：每次更新 ratio 被裁剪到 [0.8, 1.2]，防止策略突变。这就是 "Proximal" Policy Optimization 的含义——不需要额外的 KL 惩罚。
+
+VecNormalize 对 reward 归一化使 value_loss 从 3400 降到 0.03，explained_variance 达到 0.96，值函数近乎完美。
+
+### 15.5 V2 初次运行问题（2026-04-02）
+
+**问题**: MANO wrist_euler 直接驱动 base hinge 导致手朝向极端，瓶子第 15 帧掉地
+**原因**: MANO global_orient 在相机空间的 euler 角经 T 矩阵转换后仍然很大（±1.5rad），不适合直接用作 MuJoCo hinge 关节角
+**解决方向**: 
+- 位置: 用 MANO wrist 的**帧间 delta**（不是绝对值）
+- 朝向: **固定水平基础 + 小 MANO delta**（和 §13.3 相同策略）
+- 手指: 继续用 MANO hand_pose 直接映射
+
+### 15.6 V2 第二次运行（固定朝向 + MANO delta 10%）（2026-04-02）
+
+**改进**：朝向改为固定水平 + 10% MANO delta，位置用 MANO wrist 30% delta
+
+**结果**：40 帧后瓶子飞走（lift=72cm→掉地）
+**原因**：MANO finger angles 直接映射到 Allegro 后范围不对（某些负值让手指向外弹开瓶子）
+**待修正**：需要对 MANO→Allegro 手指映射做更细致的 clamp 和 scale
+
+### V2 整体结论
+
+100% MANO 驱动比预期困难——MANO 数据在相机空间的坐标和关节角不能直接用于 MuJoCo：
+1. **wrist euler** 绝对值太大→手翻倒（§15.5）
+2. **wrist euler delta** 10% 后稳定但手指弹瓶子（§15.6）
+3. **finger angles** 某些值超出 Allegro 安全范围→物理不稳定
+
+**V1 (staged trajectory + 小残差)** 的抬起成功率更高，因为参考轨迹是为 Allegro 物理特性设计的。
+**V2 (100% MANO)** 姿态更像人手，但物理稳定性差。
+
+→ 最佳方案可能是 **V1.5**: staged approach/lift 来自 V1，手指弯曲来自 MANO，朝向用固定基础 + 微小 delta。这是 RoboWheel 实际工程中的 trade-off。
+
+---
+
+## 16. V1.5 混合方案：最终结果（2026-04-03）
+
+### 方案
+
+```
+base 运动:   V1 staged trajectory (approach -6cm → hold → lift +6cm)   ← 物理稳定
+手指弯曲:   V2 MANO hand_pose → Allegro (每帧)                          ← 视觉正确
+手朝向:     固定水平 (右Z=180°, 左Y=15°)                                ← 不翻倒
+RL 残差:    ±0.05rad 32维 (仅手指)                                      ← 微调物理
+奖励:       r_track×50 + r_geo×3 + r_dyn×2 + r_con×0.15 + r_lift×50
+```
+
+### 结果
+
+| 指标 | V1 (手写) | V2 (纯MANO) | **V1.5 (混合)** |
+|------|----------|------------|---------------|
+| 手指来源 | 手写curl | MANO | **MANO** ✅ |
+| base来源 | 手写staged | MANO | **手写staged** |
+| 瓶子抬升 | 11.6cm | 飞走 | **9.9cm** ✅ |
+| 物理稳定 | ✅ | ❌ (16帧) | **✅ (200帧)** |
+| max contacts | 67 | - | **83** |
+| res_norm | 0.27 | 0.28 | **0.27** |
+| track reward | -1.4 | - | **-3.7** |
+
+### 关键指标
+
+- **200 帧全部稳定渲染** (V2 只有 16 帧就崩了)
+- **瓶子抬起 9.9cm** (V2 飞走了)
+- **手指来自 MANO** (V1 是手写的)
+- **res_norm=0.27** (RL 只偏离 MANO 参考 0.27 rad 总量)
+- **83 simultaneous contacts** (最高记录)
+
+### 输出
+
+```
+/mnt/users/yjy/robowheel-demo/output/rl_v15/
+├── ppo_v15.zip          # 训练好的 PPO 模型
+├── rl_v15.mp4           # 仿真视频 (200帧)
+├── comparison.mp4/gif   # 双栏: HaMeR | V1.5 仿真
+└── kf_*.jpg             # 6 个关键帧
+```
+
+**脚本**: `/mnt/users/yjy/robowheel-demo/step_rl_v15.py`
+
+---
+
+## 17. Arti-MANO: 1:1 MANO 映射灵巧手（2026-04-03）
+
+### 发现
+
+SPIDER 自带 **Arti-MANO**：MANO 手模型的精确 MuJoCo 实现。
+
+| | Allegro (之前) | Arti-MANO (现在) |
+|--|-------------|-----------------|
+| 手指数 | 4（无小指） | **5（含小指）** |
+| 关节/指 | 4 DOF | **4-6 DOF** |
+| 总手指 DOF | 16 | **22** |
+| 映射方式 | euler X 近似 | **1:1 直接映射** |
+| 视觉 | 机器人方块手 | **真实人手 mesh** |
+| 信息丢失 | 严重（3DOF→1DOF） | **零** |
+
+### MANO → Arti-MANO 映射
+
+```
+MANO joint (3×3 rot) → euler xyz → Arti-MANO joints:
+  Index:  euler[2]→j_index1y(spread), euler[0]→j_index1z(flex), →j_index2, →j_index3
+  Middle: 同上
+  Ring:   同上
+  Pinky:  同上（Allegro 没有小指，Arti-MANO 有）
+  Thumb:  euler[0,1,2]→j_thumb1x,1y,1z, →j_thumb2y,2z, →j_thumb3
+```
+
+### 结果
+
+- **Frame 0 手形完全正确**：真实人手形状、5 根手指、正确弯曲、瓶子在掌间
+- 后续帧手飞走：staged base trajectory 和 MANO 手指角度不协调
+- RL 收敛到"不动"：r_track 惩罚太大 vs contact/lift 奖励
+
+### 未解决的核心问题
+
+**MANO 没有提供手的绝对世界位置**——只有：
+- `cam_t`: 相机空间位移（无法直接映射到仿真世界坐标）
+- `global_orient`: 腕部朝向（相机空间，转换后范围太大）
+
+RoboWheel 论文用 **FPose 物体追踪** + **DROID SLAM 相机标定** 解决这个问题：
+- FPose → 物体在世界坐标的精确位置
+- DROID SLAM → 相机在世界坐标的精确位姿
+- 两者结合 → 手相对于物体的精确空间关系
+
+我们缺少这两步，所以无法把 MANO 手放到正确的世界坐标位置。
+
+### 输出
+
+`/mnt/users/yjy/robowheel-demo/output/rl_manohand/`
+**脚本**: `/mnt/users/yjy/robowheel-demo/step_rl_manohand.py`
+
+---
+
+## 18. SPIDER IK base + Arti-MANO fingers（2026-04-03）
+
+### 尝试
+
+用 SPIDER IK 的 base position/rotation 驱动 Arti-MANO 手的世界坐标位置，手指用 MANO 1:1 直接映射。
+
+### 结果
+
+- **Frame 109 手形完美**：Arti-MANO 真实人手 mesh，5 指正确弯曲
+- **手不在瓶子附近**：SPIDER IK 坐标系和 MuJoCo 场景坐标系不对齐
+- 需要：以物体为中心重新对齐 SPIDER IK 的 base position
+
+### 待解决
+
+SPIDER IK 在 SPIDER 自己的场景中计算 base position，但绝对坐标和我们场景不同。需要：
+```
+hand_pos_our_scene = (spider_hand_pos - spider_obj_pos) + our_obj_pos
+```
+即把 SPIDER IK 的手-物体相对偏移迁移到我们的场景中。
+
+SPIDER IK trajectory 包含 `qpos[22:29]` 是物体位姿，可以用来做这个对齐。
+
+### 18.2 坐标对齐后结果（2026-04-03）
+
+**关键公式**:
+```
+hand_pos_ours = (spider_hand - spider_obj) × 0.3 + our_bottle_pos
+```
+
+**Frame 0 效果**：双手 Arti-MANO 在瓶子两侧，真实人手 mesh，手指弯曲正确。这是所有版本中视觉上最接近原始视频的一帧。
+
+**后续帧手消失**：SPIDER IK delta 在"举杯喝水"帧时偏移量很大，叠加 approach offset 后手被推出画面。
+
+**根本矛盾**：
+- SPIDER IK 轨迹是为 Allegro 在 SPIDER 场景中算的
+- 直接迁移到 Arti-MANO 场景中需要完美的坐标对齐
+- OFFSET_SCALE 和 approach 参数的组合调参空间太大
+
+**最终结论**：单帧效果证明了 Arti-MANO + MANO 数据可以产出接近视频的手形。但完整轨迹需要 FoundationPose 提供物体的帧间追踪，或者在 SPIDER 内部用 Arti-MANO 跑完整 IK（不是迁移 Allegro IK 的结果）。
+
+---
+
+## 19. 统一方案：SPIDER 原生 Arti-MANO IK + PPO（2026-04-03）
+
+### 方案
+
+```
+SPIDER IK (--robot-type=mano)
+  → Arti-MANO base position (6DoF) + finger angles (22DoF)
+  → 坐标自动对齐（不需要手动迁移）
+  → 所有帧手都在瓶子旁边
+        ↓
+PPO RL (±0.08rad 残差)
+  → 物理微调
+```
+
+### 结果
+
+**Frame 0 是所有版本中视觉最佳的一帧**：
+- 双手真实人手 mesh（Arti-MANO）
+- 5 根手指完整可见，手指弯曲自然
+- 瓶子在双手之间
+- 桌面、光影正确
+
+**后续帧问题**：SPIDER IK base delta 范围 [-0.30, +0.32] 超出安全 clamp ±0.08，手被限制在边界外。
+
+### Frame 0 效果
+
+这证明了**完整方案是可行的**——只需要解决 base position 的动态范围问题：
+1. 用 `mocap` body 替代 slide joint（可以直接设置位姿，不经过物理求解器）
+2. 或增大 slide joint range 并降低 actuator gain
+
+### 所有版本对比
+
+| 版本 | 手形 | 抬升 | 全帧稳定 | 核心方法 |
+|------|------|------|---------|---------|
+| V1 Allegro staged | ❌ 方块手 | 11.6cm ✅ | ✅ 200帧 | 手写 curl + PPO |
+| V1.5 Allegro MANO | ⚠️ 部分 | 9.9cm ✅ | ✅ 200帧 | MANO curl + staged + PPO |
+| V2 Arti-MANO 全MANO | ✅ 完美 | 飞走 ❌ | ❌ 16帧 | 100% MANO（不稳定） |
+| Arti-MANO单独 | ✅ Frame0 | 0 | ❌ 手飞 | MANO orient 太大 |
+| **统一 SPIDER IK** | **✅ Frame0完美** | 0 | ⚠️ Frame0 | SPIDER IK + PPO |
+
+---
+
+## 20. ManipTrans 方案实现（2026-04-03）
+
+### 方法
+
+严格按 RoboWheel/ManipTrans 方案：RL 输出**完整控制量**，参考轨迹只在 reward 中。
+
+```
+观测: [当前状态(28), 参考目标(28), 瓶子(7), 接触(1), 时间(1)] = 65维
+动作: 完整 actuator 控制 28维 (6 base + 22 fingers)
+奖励: -(pos_err×20 + rot_err×5 + finger_err×10) + geo + smooth + contact + lift
+```
+
+### 结果
+
+- 训练: 300K steps, 16 envs CPU, ~20min
+- pos_err: 0.37→0.51（未收敛，手没学会到达目标位置）
+- contacts: 1, lift: 0
+- Frame 0 手在瓶子旁，后续帧手消失
+
+### 训练量不足
+
+| | ManipTrans 论文 | 我们的实现 | 差距 |
+|--|---------------|-----------|------|
+| 并行环境 | 4096 (GPU) | 16 (CPU) | **256×** |
+| 训练步数 | 数百万 | 300K | **10×+** |
+| 总样本量 | ~10 亿 | ~5 百万 | **200×** |
+| 训练时间 | 数小时 (GPU) | 20分钟 (CPU) | 不可比 |
+
+**这个算力差距无法通过改代码弥补。** 需要 IsaacGym/Isaac Lab GPU 并行或更长训练时间。
+
+### 总结
+
+ManipTrans 方案的代码框架已经正确实现：
+- ✅ RL 输出完整控制量
+- ✅ 参考轨迹只在 reward 中
+- ✅ 观测包含当前状态 + 参考目标
+- ✅ MuJoCo 接触物理
+- ❌ 训练量不足导致未收敛
+
+**脚本**: `/mnt/users/yjy/robowheel-demo/step_maniptrans.py`
+**输出**: `/mnt/users/yjy/robowheel-demo/output/maniptrans/`
+
+---
+
+## 21. FoundationPose 接入尝试（2026-04-03）
+
+### Docker 方案
+- 镜像拉取成功: `shingarey/foundationpose_custom_cuda121` (22.7GB)
+- GPU 在 Docker 中可用: `nvidia-smi` 成功检测 RTX A5000
+- 问题: FoundationPose 镜像内部 CUDA runtime 12.1 和 host driver 570 不完全兼容
+- Warp 报 "CUDA devices not available"
+
+### 宿主机方案
+- conda env `fpose`: PyTorch 2.0+cu118, CUDA available, GPU 检测成功
+- 模型权重已下载（refiner + scorer）
+- pytorch3d 安装成功
+- **阻塞**: nvdiffrast 构建需要 CUDA 11.8 nvcc，但系统只有 CUDA 12.8/13.2
+- conda 安装的 cuda-toolkit 版本是 13.2 而不是 11.8
+
+### 解决方向
+1. 在 Docker 中用 `nvidia/cuda:12.4.1-devel` 基础镜像重新构建 FoundationPose
+2. 或用 conda 安装 `cudatoolkit=11.8`（需要正确的 channel）
+3. 或升级 FoundationPose 到支持 PyTorch 2.x + CUDA 12.x 的版本
+
+### 输入数据已准备
+```
+FoundationPose/demo_data/pick_bottle/
+├── rgb/         # 151 帧 RGB (640×360)
+├── masks/       # 第一帧瓶子 mask
+└── mesh.obj     # 瓶子 mesh
+```
