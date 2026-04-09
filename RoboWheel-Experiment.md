@@ -6,6 +6,27 @@
 
 ---
 
+### Robotwheel Pipeline
+```
+Robotwheel data generation
+├── HaMeR       					# Reconstruct MANO representation for each frame
+├── Hunyuan3D   					# Reconstruct object 3D mesh
+├── Droid-slam  					# Estimate Camera Intrinsics to project reconstructed hand and object back to world coordinate
+├── TSDF        				        # avoid collision
+├── Kinematic similarity Retarget                       # unpublic retarget method 
+└── ManiTraps   				        # RL method to generate physically plausible trajectory
+```
+### Our current pipeline 
+```
+Robotwheel-demo 
+├── HaMeR          				   # Reconstruct MANO representation for each frame  [checked]
+├── Hunyuan3D      				   # Reconstruct object 3D mesh [not accurate]
+├── FoundationPose 			           # Track object orientation and position [nearly checked]
+├── MuJuCo         				   # Physics Engine to avoid physical collision [checked]
+└── ManiTraps/Spider IK+Residual                   # RL method to generate physically plausible trajectory, Retargeting included
+```
+
+
 ## 1. HaMeR 手部 3D 重建验证
 
 使用 RoboWheel 论文的核心组件 **HaMeR**（手部 3D mesh 重建）对随意视频进行手部姿态提取，验证"视频 → 手部 3D 重建"这一关键步骤的可行性。
